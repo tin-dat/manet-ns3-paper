@@ -47,14 +47,15 @@ python3 analyze.py                     # plots/, summary.csv, all_runs.csv
 - Random Waypoint, 20 m/s, area 300 x 1500 m
 - 10 CBR/UDP flows, 2048 bps, 64-byte packets, 150 s
 - SS-I: 30-100 nodes, no pause. SS-II: 50 nodes, pause 5-30 s
-- `--legacyPhy=true` (default) lowers the preamble-detection minimum RSSI from
-  -82 dBm to -96 dBm to approximate the longer radio range of NS-3.13; use
-  `--legacyPhy=false` for modern NS-3 defaults. (Disabling the preamble-detection
-  model altogether crashes dense runs with "Invalid WifiPhy state RX".)
+- The Friis model is set to 2.412 GHz (`--freq`), since 802.11b uses the 2.4 GHz band
+  (ns-3's default of 5.15 GHz gives a radio range of only ~140 m at 7.5 dBm, far too short
+  for 300 x 1500 m). This gives ~300 m with the default NS-3 receiver thresholds.
+  Lowering the preamble-detection threshold or disabling the model was tried and crashes
+  NS-3.48 dense runs with "Invalid WifiPhy state RX"; do not use it.
 
 ## Metrics
 
 Throughput (payload, Kbps), PDR (%), average end-to-end delay (ms), packet loss,
-and NRL = routing packets sent / data packets received. Sent/received packets are
-counted at application level. The paper's "NRL" columns equal PDR/100; this is kept
+and NRL = routing packets sent / data packets received. 'Sent' is the number of packets the
+sources generate on their CBR schedule (about 6000 per run); 'received' is counted at the sinks. The paper's "NRL" columns equal PDR/100; this is kept
 as `pdr_over_100` in `all_runs.csv` for comparison.
