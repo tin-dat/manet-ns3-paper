@@ -23,7 +23,18 @@ files = glob.glob("results/*.csv")
 if not files:
     raise SystemExit("No CSV files found in results/. Run run_all.sh first.")
 
-df = pd.concat((pd.read_csv(f) for f in files), ignore_index=True)
+frames, skipped = [], []
+for f in files:
+    try:
+        frames.append(pd.read_csv(f))
+    except (pd.errors.EmptyDataError, pd.errors.ParserError):
+        skipped.append(f)
+if skipped:
+    print(f"WARNING: skipped {len(skipped)} empty/unreadable file(s): {skipped}")
+    print("Delete them and re-run run_part.sh to regenerate those runs.")
+if not frames:
+    raise SystemExit("No valid CSV files found in results/.")
+df = pd.concat(frames, ignore_index=True)
 df["pdr_over_100"] = df["pdr_percent"] / 100.0  # what the paper calls "NRL"
 df.to_csv("all_runs.csv", index=False)
 
