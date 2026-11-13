@@ -134,8 +134,8 @@ main(int argc, char* argv[])
     cmd.AddValue("txPower", "Transmit power (dBm)", txPower);
     cmd.AddValue("speed", "Node speed (m/s)", speed);
     cmd.AddValue("legacyPhy",
-                 "true: disable preamble-detection model and use RxSensitivity=-96 dBm "
-                 "(close to ns-3.13); false: modern ns-3 defaults",
+                 "true: lower the preamble-detection minimum RSSI to -96 dBm (longer radio "
+                 "range, closer to ns-3.13); false: modern ns-3 defaults",
                  legacyPhy);
     cmd.AddValue("dataRate", "CBR rate per flow", dataRate);
     cmd.AddValue("packetSize", "Packet size (bytes)", packetSize);
@@ -178,12 +178,17 @@ main(int argc, char* argv[])
     wifiPhy.Set("TxPowerEnd", DoubleValue(txPower));
     if (legacyPhy)
     {
-        // Modern ns-3 only starts reception when the signal is above -82 dBm
-        // (preamble detection), which gives a radio range of only ~140 m at
-        // 7.5 dBm with Friis @5.15 GHz. ns-3.13 used a -96 dBm energy
-        // threshold (range of several hundred metres). Emulate that here.
-        wifiPhy.DisablePreambleDetectionModel();
-        wifiPhy.Set("RxSensitivity", DoubleValue(-96.0));
+        // Modern ns-3 only starts a reception when the signal is above -82 dBm
+        // (ThresholdPreambleDetectionModel, MinimumRssi), giving a radio range of only
+        // ~140 m at 7.5 dBm with Friis @5.15 GHz. ns-3.13 had a much more sensitive
+        // receiver (several hundred metres). We keep the preamble-detection model
+        // (disabling it crashes with "Invalid WifiPhy state RX" in dense networks)
+        // and only lower its minimum RSSI; the 4 dB SNR threshold then dominates.
+        wifiPhy.SetPreambleDetectionModel("ns3::ThresholdPreambleDetectionModel",
+                                          "Threshold",
+                                          DoubleValue(4.0),
+                                          "MinimumRssi",
+                                          DoubleValue(-96.0));
     }
 
     WifiMacHelper wifiMac;
