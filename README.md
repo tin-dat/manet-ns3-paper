@@ -47,9 +47,10 @@ python3 analyze.py                     # plots/, summary.csv, all_runs.csv
 - Random Waypoint, 20 m/s, area 300 x 1500 m
 - 10 CBR/UDP flows, 2048 bps, 64-byte packets, 150 s
 - SS-I: 30-100 nodes, no pause. SS-II: 50 nodes, pause 5-30 s
-- `--legacyPhy=true` (default) disables the preamble-detection model and sets
-  RxSensitivity to -96 dBm to approximate NS-3.13 radio range; use
-  `--legacyPhy=false` for modern NS-3 defaults.
+- `--legacyPhy=true` (default) lowers the preamble-detection minimum RSSI from
+  -82 dBm to -96 dBm to approximate the longer radio range of NS-3.13; use
+  `--legacyPhy=false` for modern NS-3 defaults. (Disabling the preamble-detection
+  model altogether crashes dense runs with "Invalid WifiPhy state RX".)
 
 ## Metrics
 
