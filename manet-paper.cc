@@ -122,6 +122,8 @@ main(int argc, char* argv[])
     double speed = 20.0;     // m/s
     double areaX = 300.0;    // m
     double areaY = 1500.0;   // m
+    bool bcastAtDataRate = true; // send broadcast frames (HELLO/TC/RREQ) at the data rate, as in ns-3's manet-routing-compare
+    bool speedUniform = false; // true: speed ~ Uniform[0, speed] (as in ns-3's manet-routing-compare)
     double freq = 2.412e9;   // Hz, Friis carrier frequency (802.11b = 2.4 GHz band)
 
     CommandLine cmd(__FILE__);
@@ -133,6 +135,11 @@ main(int argc, char* argv[])
     cmd.AddValue("totalTime", "Simulation time (s)", totalTime);
     cmd.AddValue("txPower", "Transmit power (dBm)", txPower);
     cmd.AddValue("speed", "Node speed (m/s)", speed);
+    cmd.AddValue("bcastAtDataRate",
+                 "true: NonUnicastMode = DsssRate2Mbps (like manet-routing-compare); "
+                 "false: ns-3 default (broadcasts at the 1 Mbps basic rate)",
+                 bcastAtDataRate);
+    cmd.AddValue("speedUniform", "Draw node speed from Uniform[0,speed] instead of a constant", speedUniform);
     cmd.AddValue("freq", "Carrier frequency used by the Friis model (Hz)", freq);
     cmd.AddValue("dataRate", "CBR rate per flow", dataRate);
     cmd.AddValue("packetSize", "Packet size (bytes)", packetSize);
@@ -160,6 +167,17 @@ main(int argc, char* argv[])
     nodes.Create(nNodes);
 
     // ---------------- Wi-Fi 802.11b ad-hoc ----------------
+    if (bcastAtDataRate)
+    {
+        // By default ns-3 sends broadcast frames at the lowest basic rate (1 Mbps), which
+        // reaches farther than the 2 Mbps unicast data frames. Routing control packets then
+        // see neighbours that data frames cannot reach. The reference example
+        // (examples/routing/manet-routing-compare.cc) avoids this by setting NonUnicastMode
+        // to the unicast mode; we do the same.
+        Config::SetDefault("ns3::WifiRemoteStationManager::NonUnicastMode",
+                           StringValue("DsssRate2Mbps"));
+    }
+
     WifiHelper wifi;
     wifi.SetStandard(WIFI_STANDARD_80211b);
 
@@ -194,12 +212,16 @@ main(int argc, char* argv[])
     pos.Set("Y", StringValue("ns3::UniformRandomVariable[Min=0.0|Max=" + std::to_string(areaY) + "]"));
     Ptr<PositionAllocator> posAlloc = pos.Create()->GetObject<PositionAllocator>();
 
+    const std::string speedStr =
+        speedUniform ? "ns3::UniformRandomVariable[Min=0.0|Max=" + std::to_string(speed) + "]"
+                     : "ns3::ConstantRandomVariable[Constant=" + std::to_string(speed) + "]";
+
     MobilityHelper mobility;
     mobility.SetPositionAllocator(posAlloc);
     mobility.SetMobilityModel(
         "ns3::RandomWaypointMobilityModel",
         "Speed",
-        StringValue("ns3::ConstantRandomVariable[Constant=" + std::to_string(speed) + "]"),
+        StringValue(speedStr),
         "Pause",
         StringValue("ns3::ConstantRandomVariable[Constant=" + std::to_string(pause) + "]"),
         "PositionAllocator",
