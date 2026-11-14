@@ -36,6 +36,20 @@ if skipped:
 if not frames:
     raise SystemExit("No valid CSV files found in results/.")
 df = pd.concat(frames, ignore_index=True)
+
+# Optional: use only seeds 1..MAX_RUN so every point has the same number of seeds,
+# e.g.  MAX_RUN=3 python3 analyze.py
+max_run = int(os.environ.get("MAX_RUN", "0"))
+if max_run:
+    df = df[df["run"] <= max_run]
+    print(f"Using only seeds 1..{max_run}")
+
+seeds = (df.groupby(["scenario", "protocol", "nodes", "pause"]).run.nunique()
+           .groupby(["scenario", "protocol"]).agg(["min", "max"]))
+print("Seeds per data point (min / max):")
+print(seeds.to_string())
+if (seeds["min"] != seeds["max"]).any() or seeds["min"].nunique() > 1:
+    print("WARNING: the number of seeds differs between points; CIs are not comparable.")
 df["pdr_over_100"] = df["pdr_percent"] / 100.0  # what the paper calls "NRL"
 df.to_csv("all_runs.csv", index=False)
 
