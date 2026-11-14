@@ -20,7 +20,10 @@ try:
 except ImportError:
     stats = None
 
-files = glob.glob("results/*.csv")
+RES_DIR = os.environ.get("RESULTS_DIR", "results")
+OUT_DIR = os.environ.get("OUT_DIR", ".")
+os.makedirs(OUT_DIR, exist_ok=True)
+files = glob.glob(f"{RES_DIR}/*.csv")
 if not files:
     raise SystemExit("No CSV files found in results/. Run run_all.sh first.")
 
@@ -51,7 +54,7 @@ print(seeds.to_string())
 if (seeds["min"] != seeds["max"]).any() or seeds["min"].nunique() > 1:
     print("WARNING: the number of seeds differs between points; CIs are not comparable.")
 df["pdr_over_100"] = df["pdr_percent"] / 100.0  # what the paper calls "NRL"
-df.to_csv("all_runs.csv", index=False)
+df.to_csv(os.path.join(OUT_DIR, "all_runs.csv"), index=False)
 
 METRICS = [
     ("throughput_kbps", "Throughput (Kbps)"),
@@ -73,7 +76,7 @@ def ci95(series):
     return t * sem
 
 
-os.makedirs("plots", exist_ok=True)
+os.makedirs(os.path.join(OUT_DIR, "plots"), exist_ok=True)
 summary_rows = []
 
 for scen, xcol, xlabel in SCENARIOS:
@@ -103,11 +106,11 @@ for scen, xcol, xlabel in SCENARIOS:
         ax.grid(True, alpha=0.3)
         ax.legend()
         fig.tight_layout()
-        fig.savefig(f"plots/{scen}_{col}.png", dpi=150)
+        fig.savefig(os.path.join(OUT_DIR, "plots", f"{scen}_{col}.png"), dpi=150)
         plt.close(fig)
 
 pd.DataFrame(summary_rows,
              columns=["scenario", "protocol", "x", "metric", "mean", "ci95"]
-             ).to_csv("summary.csv", index=False)
+             ).to_csv(os.path.join(OUT_DIR, "summary.csv"), index=False)
 print("Wrote all_runs.csv, summary.csv and plots/*.png "
       f"({len(df)} runs, {df['run'].nunique()} seeds).")
