@@ -107,6 +107,7 @@ AppRxTrace(Ptr<const Packet> packet, const Address& from)
 int
 main(int argc, char* argv[])
 {
+    LogComponentEnable("DsdvRoutingProtocol", LOG_LEVEL_ALL);
     // ---------------- Parameters ----------------
     std::string protocol = "OLSR";
     std::string scenario = "SS-I";
