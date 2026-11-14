@@ -7,6 +7,9 @@
 # Optional environment variables:
 #   RUN_FROM=1 RUN_TO=10   seeds to run (default 1..10)
 #   JOBS=1                 parallel processes (keep <= CPUs given to the VM)
+#   OUT=results_u          output directory for the CSV files (default: results)
+#   LOGDIR=logs_u          log directory (default: logs)
+#   EXTRA="--speedUniform=true"   extra options for manet-paper
 #
 # Examples:
 #   bash run_part.sh SS-I OLSR                        # 8 node counts x 10 seeds
@@ -22,8 +25,9 @@ PROTO=$2
 RUN_FROM=${RUN_FROM:-1}
 RUN_TO=${RUN_TO:-10}
 JOBS=${JOBS:-1}
-OUT=results
-LOGDIR=logs
+OUT=${OUT:-results}
+LOGDIR=${LOGDIR:-logs}
+EXTRA=${EXTRA:-}   # extra options passed to manet-paper, e.g. "--speedUniform=true"
 
 if [[ "$SCEN" != "SS-I" && "$SCEN" != "SS-II" ]] || [[ "$PROTO" != "OLSR" && "$PROTO" != "AODV" && "$PROTO" != "DSDV" ]]; then
     echo "Usage: bash run_part.sh <SS-I|SS-II> <OLSR|AODV|DSDV>"
@@ -50,7 +54,7 @@ if [ "$SCEN" = "SS-I" ]; then
         for r in $(seq "$RUN_FROM" "$RUN_TO"); do
             f="$OUT/SS-I_${PROTO}_${n}_0_${r}.csv"
             [ -s "$f" ] && continue
-            echo "$BIN --protocol=$PROTO --nNodes=$n --pause=0 --run=$r --scenario=SS-I --csv=$f" >> "$JOBFILE"
+            echo "$BIN --protocol=$PROTO --nNodes=$n --pause=0 --run=$r --scenario=SS-I --csv=$f $EXTRA" >> "$JOBFILE"
         done
     done
 else
@@ -58,7 +62,7 @@ else
         for r in $(seq "$RUN_FROM" "$RUN_TO"); do
             f="$OUT/SS-II_${PROTO}_50_${t}_${r}.csv"
             [ -s "$f" ] && continue
-            echo "$BIN --protocol=$PROTO --nNodes=50 --pause=$t --run=$r --scenario=SS-II --csv=$f" >> "$JOBFILE"
+            echo "$BIN --protocol=$PROTO --nNodes=50 --pause=$t --run=$r --scenario=SS-II --csv=$f $EXTRA" >> "$JOBFILE"
         done
     done
 fi
