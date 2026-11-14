@@ -324,6 +324,13 @@ main(int argc, char* argv[])
         fmRxPackets += it->second.rxPackets;
         delaySumMs += it->second.delaySum.GetSeconds() * 1000.0;
     }
+    
+    std::cout << "DEBUG RX: PacketSink=" << rxPackets
+          << " FlowMonitor=" << fmRxPackets
+          << " Difference="
+          << static_cast<int64_t>(rxPackets) -
+                 static_cast<int64_t>(fmRxPackets)
+          << std::endl;
 
     Simulator::Destroy();
 
