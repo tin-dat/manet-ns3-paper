@@ -12,6 +12,7 @@ import os
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+import numpy as np
 import pandas as pd
 
 try:
@@ -43,7 +44,7 @@ METRICS = [
     ("pdr_percent", "Packet delivery ratio (%)"),
     ("delay_ms", "End-to-end delay (ms)"),
     ("loss_packets", "Packet loss (packets)"),
-    ("nrl", "Normalized routing load (routing pkts / data pkts received)"),
+    ("nrl", "Normalized routing load\n(routing pkts / data pkts received)"),
 ]
 SCENARIOS = [("SS-I", "nodes", "Number of nodes"), ("SS-II", "pause", "Pause time (s)")]
 STYLE = {"OLSR": ("tab:green", "^"), "AODV": ("tab:blue", "o"), "DSDV": ("tab:red", "s")}
@@ -72,7 +73,13 @@ for scen, xcol, xlabel in SCENARIOS:
             mean, err = g.mean(), g.apply(ci95)
             if mean.empty:
                 continue
-            ax.errorbar(mean.index, mean.values, yerr=err.values, label=proto,
+            # All metrics are >= 0 (and PDR <= 100): clip the error bars so they
+            # never extend into impossible values (e.g. negative delay).
+            lower = np.minimum(err.values, mean.values)
+            upper = err.values
+            if col == "pdr_percent":
+                upper = np.minimum(err.values, 100.0 - mean.values)
+            ax.errorbar(mean.index, mean.values, yerr=[lower, upper], label=proto,
                         color=color, marker=marker, capsize=3)
             for x in mean.index:
                 summary_rows.append((scen, proto, x, col, mean[x], err[x]))
