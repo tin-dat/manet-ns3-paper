@@ -40,6 +40,13 @@ if not frames:
     raise SystemExit("No valid CSV files found in results/.")
 df = pd.concat(frames, ignore_index=True)
 
+# Result files may hold several rows (appended runs); drop accidental duplicates
+# of the same run so nothing is counted twice.
+_before = len(df)
+df = df.drop_duplicates(subset=["scenario", "protocol", "nodes", "pause", "run"], keep="last")
+if len(df) != _before:
+    print(f"NOTE: removed {_before - len(df)} duplicate run row(s)")
+
 # Optional: use only seeds 1..MAX_RUN so every point has the same number of seeds,
 # e.g.  MAX_RUN=3 python3 analyze.py
 max_run = int(os.environ.get("MAX_RUN", "0"))
