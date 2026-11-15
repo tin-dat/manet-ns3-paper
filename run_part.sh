@@ -36,7 +36,8 @@ fi
 
 mkdir -p "$OUT" "$LOGDIR"
 
-./ns3 build manet-paper || { echo "Build failed"; exit 1; }
+# SKIP_BUILD=1 avoids concurrent builds when several run_part.sh run in parallel
+[ -n "$SKIP_BUILD" ] || ./ns3 build manet-paper || { echo "Build failed"; exit 1; }
 
 BIN=$(find build/scratch -maxdepth 1 -type f -name "ns3*-manet-paper-*" | head -1)
 if [ -z "$BIN" ]; then
@@ -45,8 +46,8 @@ if [ -z "$BIN" ]; then
 fi
 export LD_LIBRARY_PATH="$PWD/build/lib:$LD_LIBRARY_PATH"
 
-LOG="$LOGDIR/${SCEN}_${PROTO}.log"
-JOBFILE="jobs_${SCEN}_${PROTO}.txt"
+LOG="$LOGDIR/${SCEN}_${PROTO}_s${RUN_FROM}-${RUN_TO}.log"
+JOBFILE="jobs_${SCEN}_${PROTO}_s${RUN_FROM}-${RUN_TO}.txt"
 : > "$JOBFILE"
 
 if [ "$SCEN" = "SS-I" ]; then
