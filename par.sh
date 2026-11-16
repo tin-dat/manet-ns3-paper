@@ -1,19 +1,26 @@
 #!/bin/bash
-# Run several seeds IN PARALLEL, one process per seed, each pinned to its own CPU core.
+# Run several seeds IN PARALLEL, one process per seed, each pinned to its own core.
 # Needs a VM with >= 4 vCPUs (core 0 is left free for the operating system).
 #
-# Usage (from ~/ns-3-dev):
-#   OUT=results EXTRA="--bcastAtDataRate=false" SEEDS="4 5 6" bash par.sh
-#   OUT=results_u LOGDIR=logs_u EXTRA="--speedUniform=true --bcastAtDataRate=false" SEEDS="1 2 3" bash par.sh
+# Usage (from the ns-3 root):
+#   SEEDS="1 2 3" bash par.sh
+#   SEEDS="4 5 6" EXTRA="--speedUniform=true" bash par.sh
 #
-# Each process handles one seed over all of SS-I and SS-II (OLSR, DSDV, then AODV).
+# Each process handles one seed over all of SS-I and SS-II (OLSR, DSDV, AODV).
 # Finished runs are skipped, so you can stop and start again at any time.
+#
+# Extra seeds beyond 1..6 are allowed: analyze.py archives them and excludes
+# them from the main averages instead of failing.
 
-cd ~/ns-3-dev || exit 1
+set -u
+
+NS3_DIR=${NS3_DIR:-$PWD}
 OUT=${OUT:-results}
 LOGDIR=${LOGDIR:-logs}
 EXTRA=${EXTRA:-}
-SEEDS=${SEEDS:-"4 5 6"}
+SEEDS=${SEEDS:-"1 2 3"}
+
+cd "$NS3_DIR" || { echo "Cannot cd to NS3_DIR=$NS3_DIR"; exit 1; }
 
 NCPU=$(nproc)
 NSEEDS=$(echo $SEEDS | wc -w)
