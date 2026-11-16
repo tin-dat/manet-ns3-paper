@@ -20,6 +20,40 @@
  *   routing bytes, NRL (routing packets sent / data packets received)
  *
  * Tested target: ns-3.4x (CMake-based ./ns3). Put this file in scratch/.
+ *
+ * ---------------------------------------------------------------------------
+ * Changes with respect to the first revision of this file
+ * ---------------------------------------------------------------------------
+ * 1. NRL is now reported twice:
+ *      nrl         - every routing packet transmitted by every node, counted
+ *                    at each hop (what the previous revision computed)
+ *      nrl_origin  - only routing packets originated by the sending node,
+ *                    i.e. the definition normally used in the literature
+ *    The previous revision silently counted per hop, which inflates OLSR's
+ *    NRL by the MPR flooding factor and makes the number incomparable with
+ *    published results.
+ *
+ * 2. `startJitter` is now created BEFORE InternetStackHelper::Install. The
+ *    three routing protocols allocate different numbers of RandomVariable
+ *    streams, so creating this variable after Install gave each protocol a
+ *    different RNG stream and therefore a different traffic start time for
+ *    the same seed.
+ *
+ * 3. PDR is clamped to 100% and a warning is printed to stderr when
+ *    recv > sent. `sent` is still derived from the CBR schedule formula, so
+ *    it can under-count by a packet or two per flow; without the clamp, a
+ *    row could report PDR > 100% while loss = 0.
+ *
+ * 4. The ad-hoc "DEBUG RX" line is replaced by a warning that is printed
+ *    only when PacketSink and FlowMonitor disagree, which turns it into a
+ *    real consistency check instead of log noise.
+ *
+ * 5. sim_time_s and payload_bytes are written to the CSV so analyze.py does
+ *    not have to hard-code them.
+ *
+ * 6. ::toupper is applied through an unsigned char lambda (passing a
+ *    possibly negative char to ::toupper is undefined behaviour).
+ * ---------------------------------------------------------------------------
  */
 
 #include "ns3/aodv-module.h"
@@ -37,6 +71,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cstdint>
 #include <fstream>
 #include <iostream>
 #include <string>
@@ -53,14 +88,22 @@ const uint16_t PORT_DSDV = 269;
 const uint16_t PORT_AODV = 654;
 const uint16_t PORT_OLSR = 698;
 
-uint64_t g_routingPackets = 0;
-uint64_t g_routingBytes = 0;
-uint64_t g_appTx = 0; // data packets accepted by the source sockets
-uint64_t g_appRx = 0; // data packets received by the sinks
+uint64_t g_routingPackets = 0;       // every transmission, every hop
+uint64_t g_routingBytes = 0;         // every transmission, every hop
+uint64_t g_routingPacketsOrigin = 0; // only packets this node originated
+uint64_t g_appTx = 0;                // data packets accepted by the source sockets
+uint64_t g_appRx = 0;                // data packets received by the sinks
 
 /**
  * Called every time an IPv4 packet is handed to a net device (every hop).
  * Counts packets whose UDP destination port belongs to a routing protocol.
+ *
+ * Two counters are kept:
+ *   g_routingPackets       - incremented at every hop (forwarded copies too)
+ *   g_routingPacketsOrigin - incremented only when the IP source address
+ *                            belongs to the node that is transmitting, i.e.
+ *                            the packet was generated locally rather than
+ *                            merely relayed.
  */
 void
 Ipv4TxTrace(Ptr<const Packet> packet, Ptr<Ipv4> ipv4, uint32_t interface)
@@ -83,10 +126,27 @@ Ipv4TxTrace(Ptr<const Packet> packet, Ptr<Ipv4> ipv4, uint32_t interface)
     }
     p->RemoveHeader(udpHeader);
     uint16_t dport = udpHeader.GetDestinationPort();
-    if (dport == PORT_DSDV || dport == PORT_AODV || dport == PORT_OLSR)
+    if (dport != PORT_DSDV && dport != PORT_AODV && dport != PORT_OLSR)
     {
-        g_routingPackets++;
-        g_routingBytes += packet->GetSize();
+        return;
+    }
+
+    g_routingPackets++;
+    g_routingBytes += packet->GetSize();
+
+    // A relayed packet keeps the source address of the node that created it,
+    // so "source belongs to this node" identifies locally originated traffic.
+    const Ipv4Address src = ipHeader.GetSource();
+    for (uint32_t i = 0; i < ipv4->GetNInterfaces(); ++i)
+    {
+        for (uint32_t j = 0; j < ipv4->GetNAddresses(i); ++j)
+        {
+            if (ipv4->GetAddress(i, j).GetLocal() == src)
+            {
+                g_routingPacketsOrigin++;
+                return;
+            }
+        }
     }
 }
 
@@ -148,7 +208,10 @@ main(int argc, char* argv[])
     cmd.AddValue("csv", "Output CSV file (appended)", csvFile);
     cmd.Parse(argc, argv);
 
-    std::transform(protocol.begin(), protocol.end(), protocol.begin(), ::toupper);
+    std::transform(protocol.begin(),
+                   protocol.end(),
+                   protocol.begin(),
+                   [](unsigned char c) { return std::toupper(c); });
     if (protocol != "OLSR" && protocol != "AODV" && protocol != "DSDV")
     {
         std::cerr << "Unknown protocol '" << protocol << "'. Use OLSR, AODV or DSDV.\n";
@@ -157,6 +220,11 @@ main(int argc, char* argv[])
     if (nNodes < 2 * nSinks)
     {
         std::cerr << "nNodes must be >= 2 * nSinks (" << 2 * nSinks << ").\n";
+        return 1;
+    }
+    if (totalTime <= 0.0 || packetSize == 0)
+    {
+        std::cerr << "totalTime and packetSize must be positive.\n";
         return 1;
     }
 
@@ -185,8 +253,11 @@ main(int argc, char* argv[])
     YansWifiChannelHelper wifiChannel;
     wifiChannel.SetPropagationDelay("ns3::ConstantSpeedPropagationDelayModel");
     // ns-3's Friis model defaults to 5.15 GHz, but 802.11b operates in the 2.4 GHz band.
-    // Using 2.412 GHz gives a radio range of roughly 300 m at 7.5 dBm with the default
-    // receiver thresholds (about 140 m at 5.15 GHz, too short for 300 x 1500 m).
+    // 2.412 GHz gives a longer radio range at 7.5 dBm (about 140 m at 5.15 GHz is far too
+    // short for a 300 x 1500 m area).
+    //
+    // NOTE: the actual range has NOT been measured yet. Run a two-node range test before
+    // trusting any density sweep; see README "Known limitations".
     wifiChannel.AddPropagationLoss("ns3::FriisPropagationLossModel",
                                    "Frequency",
                                    DoubleValue(freq));
@@ -205,6 +276,17 @@ main(int argc, char* argv[])
                                  StringValue("DsssRate2Mbps"));
 
     NetDeviceContainer devices = wifi.Install(wifiPhy, wifiMac, nodes);
+
+    // ---------------- Traffic start jitter ----------------
+    // Created before MobilityHelper::Install and InternetStackHelper::Install so that
+    // its position in ns-3's global RandomVariableStream counter cannot depend on
+    // anything protocol-specific. The three routing protocols allocate different numbers
+    // of streams, so creating this after internet.Install() gave each protocol a
+    // different stream for the same seed: the CBR flows then started at a different
+    // time and `sent` differed slightly between OLSR, AODV and DSDV.
+    Ptr<UniformRandomVariable> startJitter = CreateObject<UniformRandomVariable>();
+    startJitter->SetAttribute("Min", DoubleValue(0.0));
+    startJitter->SetAttribute("Max", DoubleValue(1.0));
 
     // ---------------- Mobility: Random Waypoint ----------------
     ObjectFactory pos;
@@ -256,9 +338,6 @@ main(int argc, char* argv[])
     // Sink i = node i, source i = node (i + nSinks). Positions are random,
     // so the pairing is effectively random.
     const uint16_t dataPort = 9;
-    Ptr<UniformRandomVariable> startJitter = CreateObject<UniformRandomVariable>();
-    startJitter->SetAttribute("Min", DoubleValue(0.0));
-    startJitter->SetAttribute("Max", DoubleValue(1.0));
 
     uint64_t generatedPackets = 0; // packets the sources try to send
     const double pktInterval = packetSize * 8.0 / DataRate(dataRate).GetBitRate();
@@ -325,23 +404,37 @@ main(int argc, char* argv[])
         fmRxPackets += it->second.rxPackets;
         delaySumMs += it->second.delaySum.GetSeconds() * 1000.0;
     }
-    
-    std::cout << "DEBUG RX: PacketSink=" << rxPackets
-          << " FlowMonitor=" << fmRxPackets
-          << " Difference="
-          << static_cast<int64_t>(rxPackets) -
-                 static_cast<int64_t>(fmRxPackets)
-          << std::endl;
+
+    // Consistency check between the two receive counters used below: PDR and throughput
+    // come from PacketSink, delay comes from FlowMonitor. They should agree.
+    if (rxPackets != fmRxPackets)
+    {
+        std::cerr << "NOTE: PacketSink=" << rxPackets << " FlowMonitor=" << fmRxPackets
+                  << " (difference "
+                  << (static_cast<int64_t>(rxPackets) - static_cast<int64_t>(fmRxPackets))
+                  << "); PDR/throughput use PacketSink, delay uses FlowMonitor.\n";
+    }
 
     Simulator::Destroy();
 
     // Metrics as defined in Section IV of the paper
     double pdr = (txPackets > 0) ? 100.0 * rxPackets / txPackets : 0.0;
+    if (rxPackets > txPackets)
+    {
+        // `sent` is a formula, not a counter, so it can under-count by a packet or two
+        // per flow. Without this clamp the CSV could claim PDR > 100% while loss = 0.
+        std::cerr << "WARNING: recv (" << rxPackets << ") > sent (" << txPackets
+                  << "). `sent` is derived from the CBR schedule and can under-count; "
+                     "PDR clamped to 100%.\n";
+        pdr = 100.0;
+    }
     // Payload throughput (matches the paper: 10 flows * 2.048 kbps * PDR)
     double throughputKbps = (rxPackets * packetSize * 8.0) / (totalTime * 1024.0);
     double avgDelayMs = (fmRxPackets > 0) ? delaySumMs / fmRxPackets : 0.0;
     uint64_t loss = (txPackets > rxPackets) ? (txPackets - rxPackets) : 0;
     double nrl = (rxPackets > 0) ? static_cast<double>(g_routingPackets) / rxPackets : 0.0;
+    double nrlOrigin =
+        (rxPackets > 0) ? static_cast<double>(g_routingPacketsOrigin) / rxPackets : 0.0;
 
     if (g_routingPackets == 0)
     {
@@ -351,10 +444,12 @@ main(int argc, char* argv[])
 
     // ---------------- Output ----------------
     std::cout << scenario << " " << protocol << " nodes=" << nNodes << " pause=" << pause
-              << " run=" << run << " | sent=" << txPackets << " accepted=" << g_appTx << " recv=" << rxPackets
-              << " PDR=" << pdr << "% thr=" << throughputKbps << "Kbps delay=" << avgDelayMs
-              << "ms loss=" << loss << " routingPkts=" << g_routingPackets << " NRL=" << nrl
-              << std::endl;
+              << " run=" << run << " | sent=" << txPackets << " accepted=" << g_appTx
+              << " recv=" << rxPackets << " PDR=" << pdr << "% thr=" << throughputKbps
+              << "Kbps delay=" << avgDelayMs << "ms loss=" << loss
+              << " routingPkts=" << g_routingPackets
+              << " routingOrig=" << g_routingPacketsOrigin << " NRL=" << nrl
+              << " NRLorigin=" << nrlOrigin << std::endl;
 
     bool needHeader = true;
     {
@@ -367,13 +462,15 @@ main(int argc, char* argv[])
     std::ofstream out(csvFile, std::ios::app);
     if (needHeader)
     {
-        out << "scenario,protocol,nodes,pause,run,sent,sent_accepted,recv,pdr_percent,throughput_kbps,"
-               "delay_ms,loss_packets,routing_packets,routing_bytes,nrl\n";
+        out << "scenario,protocol,nodes,pause,run,sent,sent_accepted,recv,pdr_percent,"
+               "throughput_kbps,delay_ms,loss_packets,routing_packets,routing_bytes,nrl,"
+               "routing_packets_origin,nrl_origin,sim_time_s,payload_bytes\n";
     }
     out << scenario << "," << protocol << "," << nNodes << "," << pause << "," << run << ","
-        << txPackets << "," << g_appTx << "," << rxPackets << "," << pdr << "," << throughputKbps << ","
-        << avgDelayMs << "," << loss << "," << g_routingPackets << "," << g_routingBytes << ","
-        << nrl << "\n";
+        << txPackets << "," << g_appTx << "," << rxPackets << "," << pdr << ","
+        << throughputKbps << "," << avgDelayMs << "," << loss << "," << g_routingPackets
+        << "," << g_routingBytes << "," << nrl << "," << g_routingPacketsOrigin << ","
+        << nrlOrigin << "," << totalTime << "," << packetSize << "\n";
     out.close();
 
     return 0;
