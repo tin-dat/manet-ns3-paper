@@ -57,40 +57,43 @@ export LD_LIBRARY_PATH="$PWD/build/lib:${LD_LIBRARY_PATH:-}"
 
 OUTFILE=range_test_results.txt
 : > "$OUTFILE"
-printf 'distance_m\tsent\treceived\tsend_failures\treachable\n' >> "$OUTFILE"
+printf 'distance_m\tsent\treceived\tpdr_percent\tsend_failures\treachable\n' >> "$OUTFILE"
 
 PROBE_SENT=0
 PROBE_RECEIVED=0
+PROBE_PDR=0
 PROBE_OK=0
 
 # Returns 0 on a usable measurement, 1 on a fatal (invalid) one.
 probe() {
     local d="$1"
-    local line rc sent received failures ok
+    local line rc sent received failures pdr ok
 
     line=$("$BIN" --distance="$d")
     rc=$?
 
     if [ "$rc" -ne 0 ]; then
-        printf '%s\t%s\t%s\t%s\t%s\n' "$d" "?" "?" ">0" "invalid" >> "$OUTFILE"
+        printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$d" "?" "?" "?" ">0" "invalid" >> "$OUTFILE"
         return 1
     fi
 
     sent=$(echo "$line" | sed -n 's/.*sent=\([0-9]*\).*/\1/p')
     received=$(echo "$line" | sed -n 's/.*received=\([0-9]*\).*/\1/p')
     failures=$(echo "$line" | sed -n 's/.*send_failures=\([0-9]*\).*/\1/p')
+    pdr=$(echo "$line" | sed -n 's/.*pdr_percent=\([0-9.]*\).*/\1/p')
     ok=$(echo "$line" | sed -n 's/.*reachable=\([01]\).*/\1/p')
 
     if [ -z "$sent" ] || [ -z "$received" ] || [ -z "$ok" ]; then
-        printf '%s\t%s\t%s\t%s\t%s\n' "$d" "?" "?" "?" "unparsable" >> "$OUTFILE"
+        printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$d" "?" "?" "?" "?" "unparsable" >> "$OUTFILE"
         return 1
     fi
 
-    printf '%s\t%s\t%s\t%s\t%s\n' \
-        "$d" "$sent" "$received" "${failures:-?}" "$ok" >> "$OUTFILE"
+    printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
+        "$d" "$sent" "$received" "${pdr:-?}" "${failures:-?}" "$ok" >> "$OUTFILE"
 
     PROBE_SENT=$sent
     PROBE_RECEIVED=$received
+    PROBE_PDR=${pdr:-0}
     PROBE_OK=$ok
     return 0
 }
@@ -110,7 +113,7 @@ abort_invalid() {
 echo "Control probe (${CONTROL_DIST} m)..."
 probe "$CONTROL_DIST" || abort_invalid "$CONTROL_DIST" "Send() failed or output unparsable"
 if [ "$PROBE_OK" != "1" ]; then
-    echo "ERROR: the link does not deliver all frames at ${CONTROL_DIST} m."
+    echo "ERROR: the link does not meet the delivery threshold at ${CONTROL_DIST} m."
     echo "  Every longer distance would be misread as out of range, so the sweep"
     echo "  is not meaningful. Check that both sockets are bound, that they use"
     echo "  the same protocol number, and the Tx power / Friis settings."
@@ -134,26 +137,32 @@ pairs=""
 # MAXDIST is appended explicitly so a value that is not a multiple of
 # COARSE_STEP is still probed; otherwise "all distances were full" would be
 # compared against a distance that was never measured.
-DISTANCES=$(seq "$COARSE_STEP" "$COARSE_STEP" "$MAXDIST" 2>/dev/null || true)
-if [ "$MAXDIST" -lt "$COARSE_STEP" ]; then
-    DISTANCES="$MAXDIST"
-else
-    case " $DISTANCES " in
-        *" $MAXDIST "*) ;;
-        *)
-            # Keep the list sorted so the last_full/prev_full pairing below stays
-            # monotonic: an out-of-order MAXDIST could otherwise pair a boundary
-            # backwards.
-            DISTANCES=$(printf '%s\n%s\n' "$DISTANCES" "$MAXDIST" | sort -n | tr '\n' ' ')
-            ;;
-    esac
+#
+# sort -n -u is what removes the duplicate: `seq 50 50 1500` already emits 1500,
+# and the previous version appended MAXDIST again because the membership test
+# matched `" 1500 "` against a string whose fields are newline-separated, so the
+# leading space never appeared. Deduplicating here also covers the case where
+# MAXDIST happens to equal the control distance.
+DISTANCES=$(
+    {
+        seq "$COARSE_STEP" "$COARSE_STEP" "$MAXDIST" 2>/dev/null || true
+        echo "$MAXDIST"
+    } | sort -n -u | awk -v c="$CONTROL_DIST" '$1 > c' | tr '\n' ' '
+)
+
+if [ -z "${DISTANCES// /}" ]; then
+    echo "ERROR: MAXDIST=${MAXDIST} leaves nothing to sweep above the control"
+    echo "  distance (CONTROL_DIST=${CONTROL_DIST}). Increase MAXDIST."
+    exit 1
 fi
 
-echo "Coarse sweep ${COARSE_STEP}..${MAXDIST} m (step ${COARSE_STEP} m)..."
+echo "Coarse sweep up to ${MAXDIST} m (step ${COARSE_STEP} m)..."
 for d in $DISTANCES; do
     probe "$d" || abort_invalid "$d" "Send() failed or output unparsable"
 
-    if [ "$PROBE_SENT" != "0" ] && [ "$PROBE_RECEIVED" = "$PROBE_SENT" ]; then
+    # `reachable` now encodes the delivery threshold, so use it rather than
+    # requiring every single frame to arrive.
+    if [ "$PROBE_OK" = "1" ]; then
         last_full=$d
         prev_full=$d
         continue
@@ -162,7 +171,7 @@ for d in $DISTANCES; do
     [ "$PROBE_RECEIVED" = "0" ] && [ -z "$first_zero" ] && first_zero=$d
     if [ "$PROBE_RECEIVED" != "0" ]; then
         [ -z "$first_partial" ] && first_partial=$d
-        partial_list="$partial_list $d($PROBE_RECEIVED/$PROBE_SENT)"
+        partial_list="$partial_list $d($PROBE_RECEIVED/$PROBE_SENT, ${PROBE_PDR}%)"
     fi
 
     # Record exactly one boundary per contiguous full run, then close it so a
@@ -183,12 +192,12 @@ if [ -n "$pairs" ]; then
             mid=$(( (lo + hi) / 2 ))
             probe "$mid" || abort_invalid "$mid" "Send() failed or output unparsable"
 
-            if [ "$PROBE_SENT" != "0" ] && [ "$PROBE_RECEIVED" = "$PROBE_SENT" ]; then
+            if [ "$PROBE_OK" = "1" ]; then
                 lo=$mid
             else
                 hi=$mid
                 [ "$PROBE_RECEIVED" != "0" ] && \
-                    partial_list="$partial_list $mid($PROBE_RECEIVED/$PROBE_SENT)"
+                    partial_list="$partial_list $mid($PROBE_RECEIVED/$PROBE_SENT, ${PROBE_PDR}%)"
             fi
         done
         [ "$lo" -gt "$last_full" ] && last_full=$lo
@@ -197,11 +206,13 @@ fi
 
 # ---------------------------------------------------------------- report
 echo
+echo "Criterion: a distance is 'reachable' when the delivery ratio meets the"
+echo "  threshold reported by range_test.cc (default 0.90 of frames)."
 # MAXDIST was actually probed (see DISTANCES above), so this comparison is sound.
 if [ "$last_full" -ge "$MAXDIST" ]; then
     echo "Radio range: >= ${MAXDIST} m (upper bound NOT reached)."
-    echo "  Every distance up to ${MAXDIST} m delivered all frames, so this is a"
-    echo "  lower bound only. Re-run with a larger limit to find the edge, e.g.:"
+    echo "  Every distance up to ${MAXDIST} m met the delivery threshold, so this is"
+    echo "  a lower bound only. Re-run with a larger limit to find the edge, e.g.:"
     echo "      MAXDIST=$((MAXDIST * 2)) bash range_test.sh"
     echo "  Per-run detail: $OUTFILE"
     exit 0
@@ -209,19 +220,19 @@ fi
 
 if [ "$last_full" -le "$CONTROL_DIST" ]; then
     echo "Radio range: below the resolution of this sweep (${CONTROL_DIST}-${COARSE_STEP} m)."
-    echo "  ${CONTROL_DIST} m delivered all frames but ${COARSE_STEP} m did not, so the"
+    echo "  ${CONTROL_DIST} m met the threshold but ${COARSE_STEP} m did not, so the"
     echo "  boundary lies in between. Re-run with a smaller step to resolve it:"
     echo "      COARSE_STEP=2 MAXDIST=${COARSE_STEP} bash range_test.sh"
     echo "  Per-run detail: $OUTFILE"
     exit 0
 fi
 
-echo "Radio range (all frames delivered): ${last_full} m"
+echo "Radio range (delivery ratio >= threshold): ${last_full} m"
 echo "  (Tx 7.5 dBm, Friis 2.412 GHz, 802.11b 2 Mbps broadcast)"
 if [ -n "$partial_list" ]; then
-    echo "  Partial reception (some frames lost, not all) at:${partial_list}"
-    echo "  The edge of coverage is a band, not a single radius: the link is reliable"
-    echo "  up to ${last_full} m and intermittent in the distances listed above."
+    echo "  Partial reception below the threshold at:${partial_list}"
+    echo "  The edge of coverage is a band, not a single radius. Read the delivery"
+    echo "  ratios above rather than treating the boundary as exact."
 fi
 if [ -n "$first_zero" ]; then
     echo "  Total loss (no frame at all) first at ${first_zero} m."
