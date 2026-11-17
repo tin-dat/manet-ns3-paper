@@ -33,35 +33,21 @@ COARSE_STEP=${COARSE_STEP:-50}
 BISECT_TOL=${BISECT_TOL:-10}
 CONTROL_DIST=${CONTROL_DIST:-1}
 
-# ns-3 names a scratch target after the FILE, prefixed with "scratch_":
-#   scratch/range_test.cc  ->  target "scratch_range_test"
-# The binary is build/scratch/ns<ver>-range_test[-<profile>].
-# A hyphenated name ("range-test") does not exist, so do not assume one.
-SRC_NAME=range_test
-TARGET_NAME=scratch_${SRC_NAME}
+# ./ns3 accepts the SHORT program name for scratch programs: it resolves
+# "range_test" through its shortcut map (built from the lock file's runnable
+# programs) to the real CMake target "scratch_range_test". Passing the CMake
+# target name here does NOT work; passing a hyphenated name does not either
+# ("Target to build does not exist: range-test").
+./ns3 build range_test || { echo "Build failed"; exit 1; }
 
-if [ ! -f "scratch/${SRC_NAME}.cc" ]; then
-    echo "ERROR: scratch/${SRC_NAME}.cc not found in $PWD"
-    echo "  ns-3 only builds scratch programs that live in scratch/."
-    echo "  Copy it there first, then re-run this script:"
-    echo "      cp /path/to/${SRC_NAME}.cc ~/ns-3-dev/scratch/"
-    echo "  Files in ~/manet-ns3-paper are NOT picked up by the build."
-    exit 1
-fi
-
-echo "Building ${TARGET_NAME}..."
-if ! ./ns3 build "$TARGET_NAME"; then
-    echo "ERROR: build of target '${TARGET_NAME}' failed."
-    echo "  If ns-3 says the target does not exist, force a CMake re-scan:"
-    echo "      ./ns3 configure --enable-examples --enable-tests"
-    echo "  then re-run this script. Compiler errors are printed above."
-    exit 1
-fi
-
-BIN=$(find build/scratch -maxdepth 1 -type f -name "ns3*-${SRC_NAME}-*" | head -1)
+BIN=$(find build/scratch -maxdepth 1 -type f -name "ns3*-range_test-*" | head -1)
 if [ -z "$BIN" ]; then
-    echo "ERROR: target ${TARGET_NAME} built, but no binary matching"
-    echo "  'build/scratch/ns3*-${SRC_NAME}-*' was found."
+    echo "ERROR: build succeeded but no binary matching"
+    echo "  'build/scratch/ns3*-range_test-*' was found."
+    echo "  Check that range_test.cc is in scratch/ and not elsewhere:"
+    echo "      ls -la scratch/range_test.cc"
+    echo "  If the file is there, force a CMake re-scan and retry:"
+    echo "      ./ns3 configure --enable-examples --enable-tests"
     echo "  Files present in build/scratch:"
     ls -1 build/scratch 2>/dev/null | sed 's/^/    /' || echo "    (none)"
     exit 1
