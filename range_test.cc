@@ -35,6 +35,7 @@
 #include "ns3/packet-socket.h"
 #include "ns3/wifi-module.h"
 
+#include <cstdio>
 #include <iostream>
 
 using namespace ns3;
@@ -81,8 +82,16 @@ main(int argc, char* argv[])
     double txPower = 7.5;      // dBm, same as manet-paper.cc
     double freq = 2.412e9;     // Hz, same as manet-paper.cc
     uint32_t packetSize = 64;  // bytes
-    uint32_t nFrames = 3;      // frames sent per test
+    // 3 frames is too few to separate "reliable" from "marginal": one random
+    // loss flips the verdict. 100 frames at 0.1 s spacing still finishes in
+    // about 10 s of simulated time and gives a usable delivery ratio.
+    uint32_t nFrames = 100;    // frames sent per test
     double spacing = 0.1;      // s between frames
+    // A distance counts as "reachable" when at least this share of frames
+    // arrives. 100% makes the boundary hinge on a single packet, so a value
+    // slightly below 1 is what actually tracks the edge of coverage. The raw
+    // delivery ratio is printed either way and stored in the results file.
+    double reachThreshold = 0.9;
 
     CommandLine cmd(__FILE__);
     cmd.AddValue("distance", "Separation between the two nodes (m)", distance);
@@ -91,7 +100,22 @@ main(int argc, char* argv[])
     cmd.AddValue("packetSize", "Frame payload size (bytes)", packetSize);
     cmd.AddValue("nFrames", "Frames to send per test", nFrames);
     cmd.AddValue("spacing", "Time between frames (s)", spacing);
+    cmd.AddValue("reachThreshold",
+                 "Fraction of frames that must arrive for reachable=1 (0..1)",
+                 reachThreshold);
     cmd.Parse(argc, argv);
+
+    if (reachThreshold <= 0.0 || reachThreshold > 1.0)
+    {
+        std::cerr << "ERROR: --reachThreshold must be in (0, 1] (got "
+                  << reachThreshold << ").\n";
+        return 2;
+    }
+    if (nFrames == 0)
+    {
+        std::cerr << "ERROR: --nFrames must be > 0.\n";
+        return 2;
+    }
 
     if (distance <= 0.0)
     {
@@ -235,11 +259,23 @@ main(int argc, char* argv[])
                      "connected, and that both nodes use the same protocol number.\n";
     }
 
+    // Delivery ratio. With nFrames=100 this is a percentage with 1% resolution.
+    const double pdrPercent =
+        100.0 * static_cast<double>(g_received) / static_cast<double>(nFrames);
+    const bool reachable = (g_sendFailures == 0) && (pdrPercent / 100.0 >= reachThreshold);
+
     // One line of machine-readable output, consumed by range_test.sh.
-    std::cout << "distance_m=" << distance << " sent=" << nFrames << " received=" << g_received
-              << " send_failures=" << g_sendFailures
-              << " reachable=" << ((g_received == nFrames && g_sendFailures == 0) ? 1 : 0)
-              << std::endl;
+    // pdr_percent and threshold are emitted so the caller can apply its own
+    // criterion instead of trusting the single reachable flag.
+    std::printf("distance_m=%.1f sent=%u received=%u send_failures=%u "
+                "pdr_percent=%.1f threshold=%.2f reachable=%d\n",
+                distance,
+                nFrames,
+                g_received,
+                g_sendFailures,
+                pdrPercent,
+                reachThreshold,
+                reachable ? 1 : 0);
 
     Simulator::Destroy();
     return (g_sendFailures > 0) ? 1 : 0;
