@@ -77,7 +77,7 @@ MAIN_METRICS = [
     ("pdr_percent", "Packet delivery ratio (%)"),
     ("delay_ms", "End-to-end delay (ms)"),
     ("loss_packets", "Packet loss (packets)"),
-    ("nrl_measured", "Normalized routing load (per-hop)"),
+    ("nrl_measured", "Normalized routing load"),
 ]
 
 STYLE = {
@@ -279,6 +279,7 @@ def validate_dataset(df):
     expected_settings = expected_main_settings()
     main = df[df["run"].isin(MAIN_SEEDS)].copy()
     group_columns = ["scenario", "protocol", "nodes", "pause"]
+    n_settings = len(expected_settings)
 
     observed_settings = set(
         main[["scenario", "protocol", "nodes", "pause"]]
@@ -290,7 +291,7 @@ def validate_dataset(df):
         print("Missing main settings:")
         for item in sorted(missing_settings):
             print(" ", item)
-        stop("The main dataset does not cover all 42 expected settings.")
+        stop(f"The main dataset does not cover all {n_settings} expected settings.")
 
     unexpected_settings = observed_settings - expected_settings
     if unexpected_settings:
@@ -315,8 +316,8 @@ def validate_dataset(df):
             print(f"  {key}: seeds {runs}")
         stop("Every main setting must contain exactly seeds 1..6.")
 
-    if len(main) != 42 * len(MAIN_SEEDS):
-        stop(f"Expected {42 * len(MAIN_SEEDS)} main rows, found {len(main)}.")
+    if len(main) != n_settings * len(MAIN_SEEDS):
+        stop(f"Expected {n_settings * len(MAIN_SEEDS)} main rows, found {len(main)}.")
 
     extras = df[~df["run"].isin(MAIN_SEEDS)]
     if len(extras):
@@ -394,10 +395,11 @@ def make_plot(subset, scenario, x_column, x_label, metric_column, y_label, outpu
         protocol_data = subset[subset["protocol"] == protocol]
         grouped = protocol_data.groupby(x_column)[metric_column]
         means = grouped.mean()
-        errors = grouped.apply(ci95)
 
         if means.empty:
             stop(f"No {protocol} data for {scenario}, metric {metric_column}.")
+
+        errors = grouped.apply(ci95)
 
         color, marker = STYLE[protocol]
         ax.errorbar(
@@ -496,12 +498,91 @@ def build_paper_comparison(df):
     return comparison
 
 
+def make_paper_overlay_plot(df, scenario, x_column, x_label, metric, y_label, output_path):
+    """Overlay the simulated mean and the paper's value on one axis.
+
+    This is the only figure that answers the README's stated goal ("compare
+    trends"): a separate simulation plot shows what this model does, and a
+    separate paper table shows what the paper claims, but only the overlay shows
+    whether the two shapes agree.
+
+    Simulation: solid line with 95% CI band and markers.
+    Paper: dashed line, hollow markers, same colour, no CI (single run).
+    """
+    paper_tables = PAPER_SS1 if scenario == "SS-I" else PAPER_SS2
+    table = paper_tables[metric]
+
+    # The paper's NRL column is PDR/100, so overlap-compare it against the same
+    # algebra computed from this simulation's PDR.
+    sim_metric = "nrl_pdr_over_100" if metric == "nrl" else metric
+
+    fig, ax = plt.subplots(figsize=(7, 4.5))
+    subset = df[df["scenario"] == scenario]
+
+    for protocol in PROTOCOLS:
+        color, marker = STYLE[protocol]
+        protocol_data = subset[subset["protocol"] == protocol]
+        grouped = protocol_data.groupby(x_column)[sim_metric]
+        means = grouped.mean()
+
+        # Plot the simulation curve if there is data, but always plot the paper
+        # curve: the whole point of this figure is the comparison, so a missing
+        # simulation series must not also hide the paper's numbers.
+        if not means.empty:
+            errors = grouped.apply(ci95)
+            ax.errorbar(
+                means.index,
+                means.values,
+                yerr=errors.values,
+                label=f"{protocol} (simulation)",
+                color=color,
+                marker=marker,
+                linewidth=1.6,
+                capsize=3,
+            )
+
+        paper_x = sorted(table.keys())
+        paper_y = []
+        for x_value in paper_x:
+            values = table[x_value]
+            paper_y.append(dict(zip(PAPER_COLUMN_ORDER, values))[protocol])
+
+        ax.plot(
+            paper_x,
+            paper_y,
+            label=f"{protocol} (paper)",
+            color=color,
+            marker=marker,
+            markerfacecolor="none",
+            markeredgewidth=1.3,
+            linestyle="--",
+            linewidth=1.2,
+            alpha=0.85,
+        )
+
+    ax.set_xlabel(x_label)
+    if metric == "nrl":
+        # Both curves here are PDR/100, not a routing load, so the shared
+        # MAIN_METRICS label would misdescribe the axis.
+        ax.set_ylabel("PDR / 100 (the paper's 'NRL' definition)")
+        ax.set_title(f"{scenario}: NRL vs paper (both are PDR/100)")
+    else:
+        ax.set_ylabel(y_label)
+        ax.set_title(f"{scenario}: {metric} - simulation vs paper")
+    ax.grid(True, alpha=0.3)
+    ax.legend(fontsize=7, ncol=2)
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=150)
+    plt.close(fig)
+
+
 def build_summaries_and_plots(df):
     os.makedirs(OUT_DIR, exist_ok=True)
     plot_dir = os.path.join(OUT_DIR, "plots")
+    overlay_dir = os.path.join(OUT_DIR, "plots_vs_paper")
     diagnostic_dir = os.path.join(OUT_DIR, "plots_nrl_pdr_over_100")
-    origin_dir = os.path.join(OUT_DIR, "plots_nrl_origin")
     os.makedirs(plot_dir, exist_ok=True)
+    os.makedirs(overlay_dir, exist_ok=True)
     os.makedirs(diagnostic_dir, exist_ok=True)
 
     summary_rows = []
@@ -536,30 +617,26 @@ def build_summaries_and_plots(df):
                         )
                     )
 
-        # Originated-only NRL, comparable with published results.
-        if "nrl_origin" in subset.columns:
-            os.makedirs(origin_dir, exist_ok=True)
-            make_plot(
-                subset, scenario, x_column, x_label,
-                "nrl_origin",
-                "Normalized routing load (originated only)",
-                os.path.join(origin_dir, f"{scenario}_nrl_origin.png"),
+        # Overlay against the paper's own numbers: the only figure that shows
+        # whether the shapes agree, which is the repo's stated goal.
+        for metric_column, y_label in MAIN_METRICS:
+            make_paper_overlay_plot(
+                df, scenario, x_column, x_label,
+                "nrl" if metric_column == "nrl_measured" else metric_column,
+                y_label,
+                os.path.join(overlay_dir, f"{scenario}_{metric_column}_vs_paper.png"),
             )
-            for protocol in PROTOCOLS:
-                protocol_data = subset[subset["protocol"] == protocol]
-                grouped = protocol_data.groupby(x_column)["nrl_origin"]
-                for x_value, values in grouped:
-                    summary_rows.append(
-                        (
-                            scenario,
-                            protocol,
-                            x_value,
-                            "nrl_origin",
-                            float(values.mean()),
-                            ci95(values),
-                            int(values.count()),
-                        )
-                    )
+
+        # NOTE: nrl_origin is intentionally NOT plotted and NOT summarised.
+        # It was meant to count only routing packets originated by the sending
+        # node, but ns-3's OLSR and AODV transmit every routing packet from a
+        # socket bound to the local address (see OLSR RoutingProtocol::SendPacket,
+        # which sends to the subnet-directed broadcast from GetAddress().GetLocal()).
+        # The IP source of a relayed packet is therefore always the relay's own
+        # address, so the source-address test cannot distinguish originated from
+        # forwarded traffic, and nrl_origin comes out identical to nrl.
+        # Both columns are still written to the CSV by manet-paper.cc for
+        # inspection, but only nrl_measured is used. See README "Metrics".
 
         # Separate diagnostic: PDR/100 is not formula-based NRL.
         make_plot(
@@ -604,9 +681,10 @@ def build_summaries_and_plots(df):
     print("  summary.csv                   - main metrics x 2 scenarios, with CI95")
     print("  paper_comparison.csv          - simulation mean vs. paper table values")
     print("  summary_nrl_pdr_over_100.csv  - separate diagnostic, not measured NRL")
-    print("  plots/                        - main comparison plots (with error bars)")
-    print("  plots_nrl_origin/             - NRL counted at the originating node")
+    print("  plots/                        - simulation only, 10 plots with error bars")
+    print("  plots_vs_paper/               - simulation vs. paper overlaid, 10 plots")
     print("  plots_nrl_pdr_over_100/       - diagnostic plots")
+    print("  (nrl_origin is written to the CSV but not plotted: it duplicates nrl)")
 
 
 def main():
@@ -621,7 +699,11 @@ def main():
     df_main.to_csv(os.path.join(OUT_DIR, "analysis_runs.csv"), index=False)
 
     print(f"Main analysis: {len(df_main)} runs, {len(MAIN_SEEDS)} seeds per setting.")
-    print("Main NRL uses routing_packets / recv (per hop); nrl_origin is reported too.")
+    print("Main NRL uses routing_packets / recv. It is NOT per-hop: ns-3's OLSR and")
+    print("  AODV send every routing packet from a socket bound to the local address,")
+    print("  so a relayed packet carries the relay's own IP source and the")
+    print("  source-address test cannot separate originated from forwarded traffic.")
+    print("  nrl_origin therefore duplicates nrl and is not plotted.")
     print("PDR/100 is kept separately as a diagnostic comparison with the paper tables.")
 
     build_summaries_and_plots(df_main)
