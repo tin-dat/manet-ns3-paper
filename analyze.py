@@ -629,12 +629,19 @@ def build_summaries_and_plots(df):
 
         # NOTE: nrl_origin is intentionally NOT plotted and NOT summarised.
         # It was meant to count only routing packets originated by the sending
-        # node, but ns-3's OLSR and AODV transmit every routing packet from a
-        # socket bound to the local address (see OLSR RoutingProtocol::SendPacket,
-        # which sends to the subnet-directed broadcast from GetAddress().GetLocal()).
-        # The IP source of a relayed packet is therefore always the relay's own
-        # address, so the source-address test cannot distinguish originated from
-        # forwarded traffic, and nrl_origin comes out identical to nrl.
+        # node, but the source-address test does not isolate that.
+        #
+        # Measured at 30 nodes, seed 1:
+        #   OLSR: routing_packets 3198,  routing_packets_origin 3198  (identical)
+        #   DSDV: routing_packets 9241,  routing_packets_origin 9241  (identical)
+        #   AODV: routing_packets 22936, routing_packets_origin 22855 (differs 0.35%)
+        #
+        # OLSR's SendPacket() sends every routing packet from a socket bound to
+        # GetAddress().GetLocal(), so a relayed packet carries the relay's own IP
+        # source and the two counters cannot differ. DSDV behaves the same way in
+        # practice. AODV does show a small residual difference, but 0.35% is too
+        # small to be a usable separate metric.
+        #
         # Both columns are still written to the CSV by manet-paper.cc for
         # inspection, but only nrl_measured is used. See README "Metrics".
 
@@ -699,11 +706,13 @@ def main():
     df_main.to_csv(os.path.join(OUT_DIR, "analysis_runs.csv"), index=False)
 
     print(f"Main analysis: {len(df_main)} runs, {len(MAIN_SEEDS)} seeds per setting.")
-    print("Main NRL uses routing_packets / recv. It is NOT per-hop: ns-3's OLSR and")
-    print("  AODV send every routing packet from a socket bound to the local address,")
-    print("  so a relayed packet carries the relay's own IP source and the")
-    print("  source-address test cannot separate originated from forwarded traffic.")
-    print("  nrl_origin therefore duplicates nrl and is not plotted.")
+    print("Main NRL uses routing_packets / recv, which counts routing packets")
+    print("  ORIGINATED by each node, not per-hop transmissions: ns-3's OLSR sends")
+    print("  every routing packet from a socket bound to the local address, so a")
+    print("  relayed packet carries the relay's own IP source and the source-address")
+    print("  test cannot separate originated from forwarded traffic.")
+    print("  nrl_origin matches nrl exactly for OLSR and DSDV, and differs by 0.35%")
+    print("  for AODV, so it is redundant and is not plotted.")
     print("PDR/100 is kept separately as a diagnostic comparison with the paper tables.")
 
     build_summaries_and_plots(df_main)
