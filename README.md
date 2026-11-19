@@ -74,25 +74,66 @@ RUN_FROM=7 RUN_TO=10 NODES="30 40 50" bash run_part.sh SS-I OLSR
 ## Metrics
 
 Throughput (payload, Kbps), PDR (%), average end-to-end delay (ms), packet loss,
-and NRL.
+and routing transmissions per received data packet (see below for how the fifth
+metric relates to NRL).
 
-`nrl` = every routing packet transmitted by every node / data packets received.
+`nrl_measured` = `routing_packets / recv` = routing transmissions per received
+data packet.
 
-This is **not** a per-hop count. ns-3's OLSR sends every routing packet from a
-socket bound to the local address (`RoutingProtocol::SendPacket` sends to the
-subnet-directed broadcast of `GetAddress().GetLocal()`), and AODV does the same,
-so a relayed packet always carries the relay's own IP source address. A
-source-address test therefore cannot separate originated from forwarded traffic.
+It is a **per-hop** counter, not an origination count. The trace fires in
+`Ipv4L3Protocol::CallTxTrace`, called only from `SendRealOut`, and `SendRealOut`
+is reached from both `Send` (a packet this node originated) and `IpForward` (a
+packet being relayed, with TTL already decremented):
 
-Verification: `routing_packets` matches `105 x nNodes` to within 1% at both 30 and
-100 nodes, where 105 is 75 HELLO (150 s / 2 s) plus 30 TC (150 s / 5 s) per node.
-If forwarded copies were counted the figure would grow faster than linearly and
-would be many times larger. So the counter measures packets **originated** by the
-node, which is the definition normally used in the literature.
+```cpp
+// Ipv4L3Protocol::IpForward
+ipHeader.SetTtl(ipHeader.GetTtl() - 1);
+m_unicastForwardTrace(ipHeader, packet, interface);
+SendRealOut(rtentry, packet, ipHeader);   // -> CallTxTrace -> m_txTrace
+```
 
-Consequence: the CSV's `routing_packets_origin` and `nrl_origin` columns duplicate
-`routing_packets` and `nrl`, because the source-address test never distinguishes
-anything. They are written for inspection but are not plotted or summarised.
+So the numerator counts **transmissions at each hop, relays included**, and can
+exceed the number of packets the network generated.
+
+**Relation to NRL.** A per-hop transmission count does not by itself disqualify
+the metric from being NRL: many published definitions of Normalized Routing Load
+also use "total routing packet transmissions" as the numerator, over "data
+packets received", and therefore also count a relayed packet once per hop. So
+`routing_packets / recv` is **NRL-style**. Whether it may be presented as NRL
+depends on matching the counting rules of the specific definition being cited —
+in particular which control packets are included (HELLO, TC, RREQ, RREP, RERR,
+HNA, MID) and whether MAC retransmissions count. That match has not been done
+here, which is why the plots use the neutral label "Routing transmissions per
+received data packet" rather than "NRL".
+
+Why the measured totals then land near `105 x nNodes` (105 = 75 HELLO at
+150 s / 2 s plus 30 TC at 150 s / 5 s per node): this is **suggestive but not
+conclusive**. `105` is a nominal figure that
+
+- assumes exactly 75 HELLO and 30 TC per node over 150 s;
+- ignores that a node with no MPR selector sends no TC at all
+  (`TcTimerExpire` skips the send), which would push the count *below* 105;
+- ignores routing packets dropped before transmission, counted in neither;
+- counts neither MAC-layer retransmissions nor per-interface duplicates, which
+  would push the count *above* 105 and are not the same thing as IP relaying.
+
+So agreement with `105 x nNodes` is consistent with a near-single-hop topology,
+but it does not measure the relay share. Establishing that needs a control run
+(e.g. logging TTL at the Tx trace, or counting only packets whose TTL is still
+the initial value). The claim "relaying is negligible" is therefore **not** made
+here.
+
+`nrl_origin` was an attempt to isolate originated packets by comparing the IP
+source with the transmitting node's own addresses. It does not work for OLSR,
+whose `SendPacket()` sends from a socket bound to `GetAddress().GetLocal()`, so a
+relayed OLSR packet carries the relay's own IP source. Measured at 30 nodes,
+seed 1: OLSR and DSDV give identical values (3198 and 9241), AODV differs by 0.35%
+(22936 vs 22855). It is retained in the CSV for inspection but not plotted, and
+it should not be relied on to separate originated from relayed traffic.
+
+If a true normalized routing load is needed, it must be built from a different
+trace: count only packets whose OLSR/DSDV/AODV header identifies the node as the
+originator, or hook each protocol's own Tx trace.
 
 'sent' is the number of packets the sources generate on their CBR schedule (about
 6000 per run); 'received' is counted at the sinks. Because `sent` is a formula rather
@@ -103,6 +144,12 @@ The paper's "NRL" columns equal PDR/100; this is kept as `nrl_pdr_over_100` for
 comparison. See below.
 
 ## Figures produced by `analyze.py`
+
+Confidence intervals use the two-sided Student-t distribution at 95%, which is the
+correct choice for 6 seeds (df = 5, t = 2.571). SciPy is preferred; if it is not
+installed, a built-in table of critical values is used rather than the normal
+approximation, because substituting 1.96 would understate the interval by 31% at
+this sample size.
 
 `plots/` — simulation only: 5 metrics x 2 scenarios, mean with a 95% CI band.
 
