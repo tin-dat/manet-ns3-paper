@@ -13,8 +13,14 @@ Main analysis:
   excluded from the main averages. They do NOT abort the analysis, so the
   scripts in this repository can be used with their default seed range
   without producing a dataset that this script rejects.
-- Uses formula-based measured NRL = routing_packets / recv as the main NRL,
-  plus nrl_origin = routing_packets_origin / recv when the column is present.
+- Uses routing_packets / recv as the fifth metric: a per-hop routing-transmission
+  ratio. The counter fires in Ipv4L3Protocol::Tx, which runs once per hop,
+  including on relay nodes (SendRealOut is called from both Send and IpForward),
+  so the numerator counts transmissions rather than originated packets. That makes
+  it NRL-style: many definitions of Normalized Routing Load also use total routing
+  transmissions as the numerator. It should only be called NRL when its
+  packet-counting rules match the definition being cited.
+  See README "Metrics" for the verified trace semantics.
 - Keeps PDR/100 separately because the original paper's NRL tables equal
   PDR/100 exactly; they are not a measured routing load.
 - Emits paper_comparison.csv, which places the simulation means next to the
@@ -77,7 +83,11 @@ MAIN_METRICS = [
     ("pdr_percent", "Packet delivery ratio (%)"),
     ("delay_ms", "End-to-end delay (ms)"),
     ("loss_packets", "Packet loss (packets)"),
-    ("nrl_measured", "Normalized routing load"),
+    # Neutral label on purpose. The numerator counts per-hop routing transmissions,
+    # which is NRL-style (many NRL definitions also sum transmissions), but the
+    # metric should only be presented AS NRL once its counting rules are matched
+    # against the specific definition being cited.
+    ("nrl_measured", "Routing transmissions per received data packet"),
 ]
 
 STYLE = {
@@ -163,6 +173,31 @@ PAPER_SS2 = {
 DERIVED_IN_PAPER = {"throughput_kbps", "loss_packets", "nrl"}
 
 
+# Critical values of the two-sided Student-t distribution at 95% for the small
+# degrees of freedom this analysis actually uses. Used only when SciPy is absent.
+# Substituting 1.96 (the normal approximation) would understate the interval badly
+# at these sample sizes: t(0.975, df=5) = 2.571, i.e. 31% wider than 1.96.
+T975 = {
+    1: 12.706, 2: 4.303, 3: 3.182, 4: 2.776, 5: 2.571,
+    6: 2.447, 7: 2.365, 8: 2.306, 9: 2.262, 10: 2.228,
+    11: 2.201, 12: 2.179, 13: 2.160, 14: 2.145, 15: 2.131,
+    16: 2.120, 17: 2.110, 18: 2.101, 19: 2.093, 20: 2.086,
+    25: 2.060, 30: 2.042, 40: 2.021, 60: 2.000, 120: 1.980,
+}
+
+
+def t_critical_975(df):
+    """Two-sided 95% Student-t critical value for df, without requiring SciPy."""
+    if stats is not None:
+        return float(stats.t.ppf(0.975, df))
+    if df in T975:
+        return T975[df]
+    # Between tabulated values, take the nearest tabulated df at or below; for
+    # larger df the last entry (1.980) is close enough to the 1.960 asymptote.
+    lower = [k for k in sorted(T975) if k <= df]
+    return T975[lower[-1]] if lower else T975[1]
+
+
 def stop(message):
     raise SystemExit(f"ERROR: {message}")
 
@@ -175,8 +210,7 @@ def ci95(series):
         return 0.0
 
     sem = values.std(ddof=1) / np.sqrt(n)
-    critical_value = stats.t.ppf(0.975, n - 1) if stats else 1.96
-    return float(critical_value * sem)
+    return float(t_critical_975(n - 1) * sem)
 
 
 def expected_main_settings():
@@ -437,8 +471,14 @@ def build_paper_comparison(df):
             # The paper's NRL column is PDR/100, not a routing load. To keep the
             # comparison apples-to-apples we compare it against the same algebra
             # recomputed from this simulation's PDR, and additionally report the
-            # two real routing-load measurements in their own columns.
+            # real routing metrics in their own columns.
             sim_metric = "nrl_pdr_over_100" if metric_column == "nrl" else metric_column
+            if metric_column == "nrl":
+                sim_definition = (
+                    "PDR / 100 (algebraic diagnostic; NOT a measured routing load)"
+                )
+            else:
+                sim_definition = metric_column
 
             for x_value, values in table.items():
                 x_int = int(x_value)
@@ -461,6 +501,7 @@ def build_paper_comparison(df):
                             protocol,
                             x_int,
                             metric_column,
+                            sim_definition,
                             paper_value,
                             sim_mean,
                             sim_mean - paper_value,
@@ -478,8 +519,8 @@ def build_paper_comparison(df):
     comparison = pd.DataFrame(
         rows,
         columns=[
-            "scenario", "protocol", "x", "metric", "paper_value",
-            "sim_mean", "delta", "sim_ci95", "n_runs",
+            "scenario", "protocol", "x", "metric", "simulation_metric_definition",
+            "paper_value", "sim_mean", "delta", "sim_ci95", "n_runs",
             "paper_value_is_derived_from_pdr",
             "sim_nrl_measured", "sim_nrl_origin",
         ],
@@ -487,10 +528,21 @@ def build_paper_comparison(df):
     comparison.to_csv(os.path.join(OUT_DIR, "paper_comparison.csv"), index=False)
 
     note = (
-        "paper_value_is_derived_from_pdr: True means the paper's column is an\n"
-        "algebraic function of PDR rather than an independent measurement\n"
-        "(throughput = 20 * PDR/100, loss = 6000 * (1 - PDR/100), NRL = PDR/100).\n"
-        "For those rows the comparison only checks that the algebra reproduces.\n"
+        "column guide for paper_comparison.csv\n"
+        "-------------------------------------\n"
+        "simulation_metric_definition: what sim_mean actually is. For metric=='nrl'\n"
+        "  it is 'PDR / 100', i.e. the same algebraic diagnostic the paper prints in\n"
+        "  its NRL column -- NOT this simulation's routing load.\n"
+        "paper_value_is_derived_from_pdr: True means the paper's column is algebra\n"
+        "  on PDR rather than an independent measurement (throughput = 20*PDR/100,\n"
+        "  loss = 6000*(1-PDR/100), NRL = PDR/100), so those rows only check that the\n"
+        "  algebra reproduces.\n"
+        "sim_nrl_measured: routing_packets / recv, a PER-HOP routing transmission\n"
+        "  ratio (the Ipv4L3Protocol::Tx trace also fires on relays). Reported only\n"
+        "  on nrl rows, for reference; it is not compared against the paper.\n"
+        "sim_nrl_origin: routing_packets_origin / recv. Does not reliably isolate\n"
+        "  originated packets (OLSR relays carry the relay's own IP source), so treat\n"
+        "  it as diagnostic only.\n"
     )
     with open(os.path.join(OUT_DIR, "paper_comparison_README.txt"), "w") as handle:
         handle.write(note)
@@ -562,10 +614,10 @@ def make_paper_overlay_plot(df, scenario, x_column, x_label, metric, y_label, ou
 
     ax.set_xlabel(x_label)
     if metric == "nrl":
-        # Both curves here are PDR/100, not a routing load, so the shared
+        # Both curves are PDR/100, not a routing load, so the shared
         # MAIN_METRICS label would misdescribe the axis.
-        ax.set_ylabel("PDR / 100 (the paper's 'NRL' definition)")
-        ax.set_title(f"{scenario}: NRL vs paper (both are PDR/100)")
+        ax.set_ylabel("PDR / 100 (what the paper calls NRL)")
+        ax.set_title(f"{scenario}: NRL vs paper (both curves are PDR/100)")
     else:
         ax.set_ylabel(y_label)
         ax.set_title(f"{scenario}: {metric} - simulation vs paper")
@@ -627,23 +679,32 @@ def build_summaries_and_plots(df):
                 os.path.join(overlay_dir, f"{scenario}_{metric_column}_vs_paper.png"),
             )
 
-        # NOTE: nrl_origin is intentionally NOT plotted and NOT summarised.
-        # It was meant to count only routing packets originated by the sending
-        # node, but the source-address test does not isolate that.
+        # NOTE: nrl_origin is NOT plotted and NOT summarised.
         #
-        # Measured at 30 nodes, seed 1:
+        # The numerator (routing_packets) counts per-hop transmissions:
+        # Ipv4L3Protocol::Tx fires in SendRealOut, which is reached from both Send
+        # (originated) and IpForward (relayed, after TTL decrement). So
+        # nrl_measured is a routing-transmission ratio, which is NRL-style but
+        # depends on the counting rules for whether it may be called NRL.
+        #
+        # nrl_origin tried to isolate originated packets by comparing the IP
+        # source with the transmitting node's addresses. Measured at 30 nodes,
+        # seed 1:
         #   OLSR: routing_packets 3198,  routing_packets_origin 3198  (identical)
         #   DSDV: routing_packets 9241,  routing_packets_origin 9241  (identical)
         #   AODV: routing_packets 22936, routing_packets_origin 22855 (differs 0.35%)
         #
-        # OLSR's SendPacket() sends every routing packet from a socket bound to
-        # GetAddress().GetLocal(), so a relayed packet carries the relay's own IP
-        # source and the two counters cannot differ. DSDV behaves the same way in
-        # practice. AODV does show a small residual difference, but 0.35% is too
-        # small to be a usable separate metric.
+        # OLSR's SendPacket() sends from a socket bound to GetAddress().GetLocal(),
+        # so a relayed OLSR packet carries the relay's own IP source and the test
+        # cannot separate the two.
         #
-        # Both columns are still written to the CSV by manet-paper.cc for
-        # inspection, but only nrl_measured is used. See README "Metrics".
+        # The totals being close to 105 x nNodes does NOT establish that relaying
+        # is negligible. The expected originated count depends on actual protocol
+        # behaviour (TC is skipped when a node has no MPR selector), and the Tx
+        # counter may include additional transmissions that offset the difference.
+        # Separating originated from relayed traffic needs its own measurement.
+        #
+        # Both columns remain in the CSV for inspection. See README "Metrics".
 
         # Separate diagnostic: PDR/100 is not formula-based NRL.
         make_plot(
@@ -691,7 +752,8 @@ def build_summaries_and_plots(df):
     print("  plots/                        - simulation only, 10 plots with error bars")
     print("  plots_vs_paper/               - simulation vs. paper overlaid, 10 plots")
     print("  plots_nrl_pdr_over_100/       - diagnostic plots")
-    print("  (nrl_origin is written to the CSV but not plotted: it duplicates nrl)")
+    print("  (nrl_origin is retained for inspection but not plotted;")
+    print("   it does not reliably isolate originated routing packets.)")
 
 
 def main():
@@ -706,13 +768,20 @@ def main():
     df_main.to_csv(os.path.join(OUT_DIR, "analysis_runs.csv"), index=False)
 
     print(f"Main analysis: {len(df_main)} runs, {len(MAIN_SEEDS)} seeds per setting.")
-    print("Main NRL uses routing_packets / recv, which counts routing packets")
-    print("  ORIGINATED by each node, not per-hop transmissions: ns-3's OLSR sends")
-    print("  every routing packet from a socket bound to the local address, so a")
-    print("  relayed packet carries the relay's own IP source and the source-address")
-    print("  test cannot separate originated from forwarded traffic.")
-    print("  nrl_origin matches nrl exactly for OLSR and DSDV, and differs by 0.35%")
-    print("  for AODV, so it is redundant and is not plotted.")
+    print("Fifth metric = routing_packets / recv, i.e. routing transmissions per")
+    print("  received data packet. The numerator is a PER-HOP count: the Tx trace")
+    print("  fires in Ipv4L3Protocol::SendRealOut, which is reached from both Send")
+    print("  (originated) and IpForward (relayed, TTL already decremented).")
+    print("  Per-hop counting does not by itself disqualify it as NRL -- many NRL")
+    print("  definitions also count total routing transmissions. It is NRL-style;")
+    print("  presenting it AS NRL requires matching the cited definition's rules for")
+    print("  which control packets count. Hence the neutral plot label.")
+    print("  NOTE: measured totals fall near 105 x nNodes, but that is NOT evidence")
+    print("  that relaying is negligible. '105' assumes exactly 75 HELLO + 30 TC per")
+    print("  node, ignores TC suppression when a node has no MPR selector, ignores")
+    print("  packets dropped before transmission, and counts neither MAC")
+    print("  retransmissions nor per-interface duplicates. Treat the agreement as")
+    print("  suggestive only; measuring the relay share needs its own control run.")
     print("PDR/100 is kept separately as a diagnostic comparison with the paper tables.")
 
     build_summaries_and_plots(df_main)
